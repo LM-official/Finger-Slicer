@@ -1,0 +1,21 @@
+# virtual environment
+.venv/
+
+# temp files
+__pycache__/
+.vscode/
+assets/*
+previews/*
+.temp/*
+
+# model parameters
+*.pt
+*.task
+
+# files to keep
+!.gitkeep
+
+# files to ignore
+*.png
+*.jpg
+*.jpeg
