@@ -40,15 +40,6 @@ BACKGROUND_THRESHOLD      = 0.50
 SUBPART_OVERLAP_THRESHOLD = 0.80
 
 # =============================================================================
-# SAVED IMAGES CANVAS SIZE
-# =============================================================================
-
-# Every extracted object is fitted onto a transparent canvas
-# of these dimensions before being saved
-SAVE_IMG_W = 512
-SAVE_IMG_H = 512
-
-# =============================================================================
 # MASK OVERLAYS CONFIGS
 # =============================================================================
 
@@ -97,8 +88,9 @@ CAM_FPS    = 60
 # Folder we pull RGBA projectile sprites from (same place segment_objects.py saves to)
 ASSETS_DIR            = DEFAULT_OUTPUT_DIR
 
-# Longest side of a projectile in pixels after trimming + downscaling the source PNG
-# Sources are saved at 512x512 with transparent padding — too big to throw around at game scale
+# Longest side of a projectile in pixels. Segmented objects are fitted directly onto a
+# PROJECTILE_MAX_SIZE x PROJECTILE_MAX_SIZE transparent canvas when saved, so sprites
+# already load at game scale — no second downscale at gameplay time
 PROJECTILE_MAX_SIZE   = 180
 
 # Physics (units: pixels per frame at CAM_FPS)
@@ -141,3 +133,14 @@ COMBO_OUTLINE_THICKNESS = 4
 COMBO_SLOWMO_DURATION  = 20     # frames of slow-motion granted per combo hit
 COMBO_SLOWMO_FACTOR    = 0.35   # physics time-scale while slow-motion is active
 COMBO_MAX_HITS         = 10      # hits before the combo finally splits like normal fruit
+
+# =============================================================================
+# AUDIO CONFIGS
+# =============================================================================
+
+# Folder holding the gameplay sound effects
+SOUNDS_DIR        = Path(__file__).parent / "sounds"
+
+# Played whenever a projectile is split, and once when the game ends
+BLADE_SLICE_SOUND = SOUNDS_DIR / "blade_slice.mp3"
+GAME_OVER_SOUND   = SOUNDS_DIR / "game_over.mp3"

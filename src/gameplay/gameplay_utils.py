@@ -14,9 +14,12 @@ from collections import deque
 from config import *
 import cv2
 from dataclasses import dataclass, field
+from enum import Enum, auto
 import numpy as np
 from pathlib import Path
 import random
+import sounddevice as sd
+import threading
 from typing import Optional
 import urllib.request
 
@@ -42,8 +45,10 @@ def load_model() -> Path:
 
 def load_assets() -> list[np.ndarray]:
     """
-    Loads every RGBA PNG from `ASSETS_DIR`, trims away transparent padding and
-    downscales it, so the longest side is less or equal to `PROJECTILE_MAX_SIZE`.
+    Loads every RGBA PNG from `ASSETS_DIR` and trims away its transparent padding.
+
+    Sprites are saved by the segmentation step already fitted to `PROJECTILE_MAX_SIZE`
+    (longest side), so they load at game scale and need no further downscaling here.
 
     Returns:
         A list of RGBA sprites as NumPy arrays for the projectiles.
@@ -57,16 +62,11 @@ def load_assets() -> list[np.ndarray]:
         if img is None or img.ndim != 3 or img.shape[2] < 4:
             continue
 
-        # Trim transparent padding
+        # Trim transparent padding for a tight projectile hitbox
         trimmed = trim_rgba(img)
         if trimmed is None:
             continue
 
-        # Downscale if the longest side exceeds PROJECTILE_MAX_SIZE
-        h, w  = trimmed.shape[:2]
-        scale = PROJECTILE_MAX_SIZE / max(h, w)
-        if scale < 1.0:
-            trimmed = cv2.resize(trimmed, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
         sprites.append(trimmed)
 
     return sprites
@@ -97,6 +97,103 @@ def show_warning(title: str, message: str) -> None:
         root.destroy()
     except Exception:
         pass
+
+# =============================================================================
+# AUDIO
+# =============================================================================
+
+# Cache of decoded sounds so each file is read and decoded from disk only once
+_sound_cache: dict[Path, tuple[np.ndarray, int]] = {}
+
+# Keep a single output stream open for the whole game in order to play overlapping sounds without glitches or delays
+_audio_lock                              = threading.Lock()
+_voices: list[list]                      = []      # currently-playing sounds, each a [samples, cursor] pair
+_audio_stream: Optional[sd.OutputStream] = None    # the shared sounddevice.OutputStream, opened on first use
+
+def _audio_callback(outdata: np.ndarray, frames: int, time_info, status) -> None:
+    """
+    Mixes every active voice into the output buffer. Runs on the audio thread.
+    
+    Args:
+        outdata: The output buffer to fill with audio samples.
+        frames: The number of frames to be filled in this callback.
+        time_info: Timing information provided by sounddevice (not used here).
+        status: Callback status provided by sounddevice (not used here).
+    """
+    outdata.fill(0.0)
+    with _audio_lock:
+        for voice in _voices:
+            samples, cursor = voice
+            chunk = samples[cursor:cursor + frames]
+            outdata[:len(chunk)] += chunk
+            voice[1] = cursor + len(chunk)
+        # Drop voices that have finished playing
+        _voices[:] = [v for v in _voices if v[1] < len(v[0])]
+    # Clamp so several overlapping effects can't sum past full scale and distort
+    np.clip(outdata, -1.0, 1.0, out=outdata)
+
+
+def _decode(path: Path) -> tuple[np.ndarray, int]:
+    """
+    Decodes an audio file to (samples, samplerate), caching the result.
+    
+    Args:
+        path: Path to the audio file to decode.
+
+    Returns:
+        A tuple of (samples, samplerate).
+    """
+    import soundfile as sf
+    if path not in _sound_cache:
+        _sound_cache[path] = sf.read(str(path), dtype="float32", always_2d=True)
+    return _sound_cache[path]
+
+
+def _ensure_stream(fs: int, channels: int) -> None:
+    """
+    Opens the shared output stream once, matching the given audio format.
+    
+    Args:
+        fs: Sample rate of the audio to be played.
+        channels: Number of channels of the audio to be played.
+    """
+    global _audio_stream
+    if _audio_stream is None:
+        _audio_stream = sd.OutputStream(
+            samplerate=fs, channels=channels, callback=_audio_callback,
+        )
+        _audio_stream.start()
+
+
+def init_audio() -> None:
+    """
+    Pre-decodes the game's sound effects and opens the audio device up front.
+
+    Opening the device costs ~200 ms, so warming it here at startup keeps the
+    first in-game slice from hitching. Call once before the main loop.
+    """
+    for path in (BLADE_SLICE_SOUND, GAME_OVER_SOUND):
+        samples, fs = _decode(path)
+        _ensure_stream(fs, samples.shape[1])
+
+
+def play_sound(path: Path) -> None:
+    """
+    Plays a sound effect asynchronously by mixing it into a shared output stream.
+
+    The file is decoded once and cached; each call then just queues the samples
+    for the always-open stream to mix, so triggering a sound is cheap and never
+    blocks the game loop, even when fired on many consecutive frames.
+
+    Args:
+        path: Path to the audio file to play.
+    """
+    samples, fs = _decode(path)
+    _ensure_stream(fs, samples.shape[1])
+
+    # Queue the sound for the callback to mix in on its next block
+    with _audio_lock:
+        _voices.append([samples, 0])
 
 # =============================================================================
 # PROJECTILE
@@ -134,6 +231,17 @@ def add_outline(sprite: np.ndarray, color: tuple[int, int, int], thickness: int)
 
     return out
 
+class ProjectileKind(Enum):
+    """
+    The three projectile types:
+    - `NORMAL`: sliced once for a point
+    - `BOMB`: slicing it is an instant game over
+    - `COMBO`: sliced repeatedly, triggers slow-motion, pure bonus
+    """
+    NORMAL = auto()     # sliced once for a point
+    BOMB   = auto()     # slicing it is an instant game over
+    COMBO  = auto()     # sliced repeatedly, triggers slow-motion, pure bonus
+
 @dataclass
 class Projectile:
     """
@@ -148,8 +256,7 @@ class Projectile:
     omega:    float = 0.0       # angular velocity of the projectile
     sliced:   bool  = False     # flags the two halves so they are not re-sliced
     scored:   bool  = False     # flags anything that should NOT count as a miss when it leaves the screen
-    is_bomb:  bool  = False     # projectiles end the game instantly if the player slices them
-    is_combo: bool  = False     # projectiles can be sliced repeatedly and trigger slow-motion
+    kind: ProjectileKind = ProjectileKind.NORMAL  # which of the three projectile types this is
     hits:     int   = 0         # combo-only: how many times it has been hit so far
 
     def update(self, time_scale: float = 1.0) -> None:
@@ -302,17 +409,15 @@ class GameState:
         # Picking a random sprite
         sprite = random.choice(sprites)
         # Single roll decides between normal / bomb / combo projectiles
-        roll     = random.random()
-        is_bomb  = roll < BOMB_SPAWN_CHANCE
-        is_combo = not is_bomb and roll < BOMB_SPAWN_CHANCE + COMBO_SPAWN_CHANCE
-
-        # Bombs get a red outline
-        if is_bomb:
-            sprite = add_outline(sprite, BOMB_OUTLINE_COLOR, BOMB_OUTLINE_THICKNESS)
-
-        # Combos get a yellow outline
-        elif is_combo:
-            sprite = add_outline(sprite, COMBO_OUTLINE_COLOR, COMBO_OUTLINE_THICKNESS)
+        roll = random.random()
+        if roll < BOMB_SPAWN_CHANCE:
+            kind = ProjectileKind.BOMB
+            sprite = add_outline(sprite, BOMB_OUTLINE_COLOR, BOMB_OUTLINE_THICKNESS)   # Bombs get a red outline
+        elif roll < BOMB_SPAWN_CHANCE + COMBO_SPAWN_CHANCE:
+            kind = ProjectileKind.COMBO
+            sprite = add_outline(sprite, COMBO_OUTLINE_COLOR, COMBO_OUTLINE_THICKNESS) # Combos get a yellow outline
+        else:
+            kind = ProjectileKind.NORMAL
 
         # Spawn just below the visible frame so the projectile "rises" into view
         x = random.randint(int(W * 0.15), int(W * 0.85))
@@ -327,7 +432,7 @@ class GameState:
         # Create and add the new projectile to the game state
         self.projectiles.append(Projectile(
             sprite=sprite, x=x, y=y, vx=vx, vy=vy, omega=omega,
-            is_bomb=is_bomb, is_combo=is_combo, scored=is_combo, # Combos are pure bonus so if it leaves the screen unsliced doesn't cost a life
+            kind=kind, scored=(kind is ProjectileKind.COMBO), # Combos are pure bonus so if it leaves the screen unsliced doesn't cost a life
         ))
 
     def step(self, W: int, H: int):
@@ -353,7 +458,7 @@ class GameState:
                 # A whole projectile that left without being sliced costs a life
                 # Halves (scored=True) and already-sliced fragments don't
                 # Bombs are skipped too
-                if not p.scored and not p.is_bomb:
+                if not p.scored and p.kind is not ProjectileKind.BOMB:
                     # Increasing the missing counter
                     self.misses += 1
 
@@ -399,32 +504,35 @@ class GameState:
             # Check for intersection between the slice segment and the projectile's hitbox
             inside, _, _ = cv2.clipLine(proj.hitbox(), p1, p2)
             if inside:
-                # If the projectile is a bomb, it sets an instant game over
-                if proj.is_bomb:
-                    # Slicing a bomb is an instant game over: bump misses to
-                    # the cap so game_over() flips true on the same frame
-                    self.misses = MAX_MISSES
-                    next_projectiles.append(proj)
-
-                # If the projectile is a combo, it can be hit multiple times, it eventually splits when reaches COMBO_MAX_HITS
-                elif proj.is_combo:
-                    # Each hit on a combo projectile increases the score, refreshes the slow-motion timer, and increments the hit count
-                    self.score        += 1
-                    self.slowmo_frames = COMBO_SLOWMO_DURATION
-                    proj.hits         += 1
-
-                    # On final hit it gets sliced, so the halves get added to the projectile list
-                    if proj.hits >= COMBO_MAX_HITS:
-                        next_projectiles.extend(_split(proj))
-
-                    # Otherwise add it as a whole projectile for the next frame
-                    else:
+                # Play the blade slice sound effect on hit
+                play_sound(BLADE_SLICE_SOUND)
+                
+                match proj.kind:
+                    # Slicing a bomb is an instant game over
+                    case ProjectileKind.BOMB:
+                        # Bump misses to the cap so game_over() flips true on the same frame
+                        self.misses = MAX_MISSES
                         next_projectiles.append(proj)
 
-                # Normal projectile are sliced immediately into halves
-                else:
-                    self.score += 1
-                    next_projectiles.extend(_split(proj))
+                    # A combo can be hit multiple times, eventually splitting when it reaches COMBO_MAX_HITS
+                    case ProjectileKind.COMBO:
+                        # Each hit increases the score, refreshes the slow-motion timer, and increments the hit count
+                        self.score        += 1
+                        self.slowmo_frames = COMBO_SLOWMO_DURATION
+                        proj.hits         += 1
+
+                        # On final hit it gets sliced, so the halves get added to the projectile list
+                        if proj.hits >= COMBO_MAX_HITS:
+                            next_projectiles.extend(_split(proj))
+
+                        # Otherwise add it as a whole projectile for the next frame
+                        else:
+                            next_projectiles.append(proj)
+
+                    # Normal projectiles are sliced immediately into halves
+                    case ProjectileKind.NORMAL:
+                        self.score += 1
+                        next_projectiles.extend(_split(proj))
 
             # If the slice does not intersect the projectile, it survives to the next frame as is
             else:
