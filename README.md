@@ -97,7 +97,7 @@ costs a life — three misses ends the run.
 Finger-Slicer/
 ├── launcher.py                       # GUI launcher (entry point)
 ├── config.py                         # All tunable constants (physics, thresholds, models…)
-├── requirements.txt
+├── requirements.txt                  # Dependencies
 ├── src/
 │   ├── segmentation/
 │   │   ├── segment_objects.py        # Stage 1: YOLO / SAM segmentation modes
@@ -282,4 +282,13 @@ logic. A few you might want to play with:
 
 ---
 
-*Snap a photo, slice it to pieces. 🍉*
+## 👥 Authors
+
+Finger Slicer was designed and built by:
+
+- **[LM-officiale](https://github.com/LM-official)**
+- **[Pierba](https://github.com/Pierba)**
+
+---
+
+*Snap a photo, slice it to pieces. 🍉*s
