@@ -286,9 +286,9 @@ logic. A few you might want to play with:
 
 Finger Slicer was designed and built by:
 
-- **[LM-officiale](https://github.com/LM-official)**
+- **[LM-official](https://github.com/LM-official)**
 - **[Pierba](https://github.com/Pierba)**
 
 ---
 
-*Snap a photo, slice it to pieces. 🍉*s
+*Snap a photo, slice it to pieces. 🍉*
