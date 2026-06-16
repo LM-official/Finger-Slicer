@@ -3,19 +3,9 @@
 
 # temp files
 __pycache__/
-.vscode/
 assets/*
 previews/*
 weights/*
 
-# model parameters
-*.pt
-*.task
-
 # files to keep
 !.gitkeep
-
-# files to ignore
-*.png
-*.jpg
-*.jpeg
